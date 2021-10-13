@@ -5,7 +5,10 @@ import torch
 from evaluation.tasks.auto_task import AutoTask
 
 import pandas as pd
+from scipy import spatial
+from sent2vec.vectorizer import Vectorizer
 
+from sentence_transformers import SentenceTransformer, util
 
 class CrowSPairsDataset(Dataset):
     def __init__(self, tokenizer):
@@ -35,6 +38,37 @@ class CrowSPairsDataset(Dataset):
     def __getitem__(self, index):
         return self.items[index]
 
+def cosim(v1, v2):
+    dot_product = sum(n1 * n2 for n1, n2 in zip(v1, v2) )
+    magnitude1 = math.sqrt(sum(n ** 2 for n in v1))
+    magnitude2 = math.sqrt(sum(n ** 2 for n in v2))
+    return dot_product / (magnitude1 * magnitude2)
+
+def score_sentence_1(df,tokenizer):
+    df["sent1"] = df.apply(lambda row: tokenizer.encode(row["sent_less"]))
+    df["sent2"] = df.apply(lambda row: tokenizer.encode(row["sent_more"]))
+    df["cosim"] = [cosim(i,j) for i,j in zip(df["sent1"],df["sent2"])]
+
+def create_word_frequency_table(words: list) -> dict:
+    freq_table = dict()
+    for word in words:
+        if word in freq_table:
+            freq_table[word] += 1
+        else:
+            freq_table[word] = 1
+    return freq_table
+
+def create_sentence_score_table(sentences, freq_table) -> dict:
+    sent_value = dict()
+    for sentence in sentences:
+        for word, freq in freq_table.items():
+            if ps.stem(word) in sentence.lower():
+                if sentence[:15] in sent_value:
+                    sent_value[sentence[:15]] += freq
+                else:
+                    sent_value[sentence[:15]] = freq
+
+    return sent_value
 
 def score_sentence(logits):
     # Compute average log probability of each sub word
@@ -42,7 +76,51 @@ def score_sentence(logits):
     # https://arxiv.org/pdf/2004.09456.pdf
     # See https://github.com/moinnadeem/StereoSet/blob/master/code/eval_generative_models.py#L98
     # TODO: implement score as average log probability (using logits)
-    return 0
+    # we use the 0th item since that corresponds to the prediction scores over vocab tokens
+    output = torch.softmax(logits[0], dim=-1)
+    # iterate over the context and setup those probabilities.
+    for idx in range(1, context_length):
+        # ASSUMPTION: the 0th output corresponds to the probability of the 1st token.
+        context_probability.append(
+        output[0, idx-1, tokens[idx]].item())
+
+        # iterate over the sentence and setup those probabilities.
+        for idx in range(1, len(tokens)):
+        # ASSUMPTION: the 0th output corresponds to the probability of the 1st token.
+        sentence_probability.append(
+            output[0, idx-1, tokens[idx]].item())
+
+        full_sentence = f"{sentence.sentence}"
+        tokens = self.tokenizer.encode(full_sentence)
+        tokens_tensor = torch.tensor(
+            tokens).to(self.device).unsqueeze(0)
+
+        no_context_probability = [
+                    initial_token_probabilities[0, 0, tokens[0]].item()]
+        
+        logits = model(tokens_tensor)
+        output = torch.softmax(logits[0], dim=-1)
+
+        # setup the probability for the sentence if we didn't provide the context
+        for idx in range(1, len(tokens)):
+            no_context_probability.append(
+                        output[0, idx-1, tokens[idx]].item())
+
+            context_score = np.mean([np.log2(i)
+                        for i in context_probability])
+
+            sentence_score = np.mean([np.log2(i)
+                        for i in sentence_probability])
+            no_context_score = np.mean(
+                    [np.log2(i) for i in no_context_probability])
+
+            overall_score = no_context_score / context_score
+            probabilities['id'] = sentence.ID
+            probabilities['score'] = overall_score
+
+            predictions.append(probabilities)
+    return predictions
+
 
 
 class CrowSPairsTask(AutoTask):
